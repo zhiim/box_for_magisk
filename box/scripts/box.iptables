@@ -240,6 +240,10 @@ start_redirect() {
     ${iptables} -t nat -F BOX_EXTERNAL
     ${iptables} -t nat -N BOX_LOCAL
     ${iptables} -t nat -F BOX_LOCAL
+    ${iptables} -t nat -N BOX_EXTERNAL_PROXY
+    ${iptables} -t nat -F BOX_EXTERNAL_PROXY
+    ${iptables} -t nat -N BOX_LOCAL_PROXY
+    ${iptables} -t nat -F BOX_LOCAL_PROXY
   fi
 
   if [ "${iptables}" = "$IPV" ]; then
@@ -262,7 +266,14 @@ start_redirect() {
 
     ${iptables} -t nat -N LOCAL_IP_V4
     ${iptables} -t nat -F LOCAL_IP_V4
-    
+
+    # Fake-IP skips destination bypass only; interface/app selection still applies.
+    # Use goto so RETURN in the selection chain cannot fall back into intranet rules.
+    if [ -n "${fake_ipv4_range}" ]; then
+      ${iptables} -t nat -A BOX_EXTERNAL -d "${fake_ipv4_range}" -g BOX_EXTERNAL_PROXY
+      ${iptables} -t nat -A BOX_LOCAL -d "${fake_ipv4_range}" -g BOX_LOCAL_PROXY
+    fi
+
     for subnet in ${intranet[@]} ; do
       ${iptables} -t nat -A BOX_EXTERNAL -d ${subnet} -j RETURN
       ${iptables} -t nat -A BOX_LOCAL -d ${subnet} -j RETURN
@@ -270,12 +281,14 @@ start_redirect() {
     
     ${iptables} -t nat -A BOX_EXTERNAL -j LOCAL_IP_V4
     ${iptables} -t nat -A BOX_LOCAL -j LOCAL_IP_V4
+    ${iptables} -t nat -A BOX_EXTERNAL -g BOX_EXTERNAL_PROXY
+    ${iptables} -t nat -A BOX_LOCAL -g BOX_LOCAL_PROXY
 
-    ${iptables} -t nat -A BOX_EXTERNAL -p tcp -i lo -j REDIRECT --to-ports "${redir_port}"
+    ${iptables} -t nat -A BOX_EXTERNAL_PROXY -p tcp -i lo -j REDIRECT --to-ports "${redir_port}"
 
     if [ "${ap_list}" != "" ]; then
       for ap in "${ap_list[@]}"; do
-        ${iptables} -t nat -A BOX_EXTERNAL -p tcp -i "${ap}" -j REDIRECT --to-ports "${redir_port}"
+        ${iptables} -t nat -A BOX_EXTERNAL_PROXY -p tcp -i "${ap}" -j REDIRECT --to-ports "${redir_port}"
       done
         [ ${network_mode} = "enhance" ] || log Info "${ap_list[*]} transparent proxy."
     fi
@@ -285,7 +298,7 @@ start_redirect() {
 
     if [ "${ignore_out_list}" != "" ]; then
       for ignore in "${ignore_out_list[@]}"; do
-        ${iptables} -t nat -A BOX_LOCAL -o "${ignore}" -j RETURN
+        ${iptables} -t nat -A BOX_LOCAL_PROXY -o "${ignore}" -j RETURN
       done
       [ ${network_mode} = "enhance" ] || log Info "${ignore_out_list[*]} ignore transparent proxy."
     fi
@@ -295,19 +308,19 @@ start_redirect() {
     case "${proxy_mode}" in
       blacklist|black)
         if [ -z "$(cat "${uid_list[@]}")" ] ; then
-          ${iptables} -t nat -A BOX_LOCAL -p tcp -j REDIRECT --to-ports "${redir_port}"
+          ${iptables} -t nat -A BOX_LOCAL_PROXY -p tcp -j REDIRECT --to-ports "${redir_port}"
           [ ${network_mode} = "enhance" ] || log Info "Transparent proxy for all apps."
         else
           while read -r appid; do
-            ${iptables} -t nat -A BOX_LOCAL -m owner --uid-owner "${appid}" -j RETURN
+            ${iptables} -t nat -A BOX_LOCAL_PROXY -m owner --uid-owner "${appid}" -j RETURN
           done < "${uid_list[@]}"
-          ${iptables} -t nat -A BOX_LOCAL -p tcp -j REDIRECT --to-ports "${redir_port}"
+          ${iptables} -t nat -A BOX_LOCAL_PROXY -p tcp -j REDIRECT --to-ports "${redir_port}"
           [ ${network_mode} = "enhance" ] || log Info "proxy mode: ${proxy_mode} (${packages_list[*]}) no transparent proxy."
         fi
 
         if [ "${gid_list}" != "" ] ; then
           for gid in ${gid_list[@]} ; do
-            ${iptables} -t nat -A BOX_LOCAL -m owner --gid-owner ${gid} -j RETURN
+            ${iptables} -t nat -A BOX_LOCAL_PROXY -m owner --gid-owner ${gid} -j RETURN
           done
           [ ${network_mode} = "enhance" ] || {
             [ "${iptables}" = "$IPV" ] &&  log Info "proxy mode: ${proxy_mode}, GID (${gid_list[*]}) no transparent proxy."
@@ -316,27 +329,27 @@ start_redirect() {
         ;;
       whitelist|white)
         if [ -z "$(cat "${uid_list[@]}")" ] ; then
-          ${iptables} -t nat -A BOX_LOCAL -p tcp -j REDIRECT --to-ports "${redir_port}"
+          ${iptables} -t nat -A BOX_LOCAL_PROXY -p tcp -j REDIRECT --to-ports "${redir_port}"
           [ ${network_mode} = "enhance" ] || log Info "Transparent proxy for all apps."
         else
           while read -r appid; do
-            ${iptables} -t nat -A BOX_LOCAL -p tcp -m owner --uid-owner "${appid}" -j REDIRECT --to-ports "${redir_port}"
+            ${iptables} -t nat -A BOX_LOCAL_PROXY -p tcp -m owner --uid-owner "${appid}" -j REDIRECT --to-ports "${redir_port}"
           done < "${uid_list[@]}"
-          ${iptables} -t nat -A BOX_LOCAL -p tcp -m owner --uid-owner 0 -j REDIRECT --to-ports "${redir_port}"
-          ${iptables} -t nat -A BOX_LOCAL -p tcp -m owner --uid-owner 1052 -j REDIRECT --to-ports "${redir_port}"
+          ${iptables} -t nat -A BOX_LOCAL_PROXY -p tcp -m owner --uid-owner 0 -j REDIRECT --to-ports "${redir_port}"
+          ${iptables} -t nat -A BOX_LOCAL_PROXY -p tcp -m owner --uid-owner 1052 -j REDIRECT --to-ports "${redir_port}"
           [ ${network_mode} = "enhance" ] || log Info "proxy mode: ${proxy_mode} (${packages_list[*]}) transparent proxy."
         fi
 
         if [ "${gid_list}" != "" ] ; then
           for gid in ${gid_list[@]} ; do
-            ${iptables} -t nat -A BOX_LOCAL -p tcp -m owner --gid-owner ${gid} -j REDIRECT --to-ports ${redir_port}
+            ${iptables} -t nat -A BOX_LOCAL_PROXY -p tcp -m owner --gid-owner ${gid} -j REDIRECT --to-ports ${redir_port}
           done
           [ ${network_mode} = "enhance" ] || [ "${iptables}" = "$IPV" ] && log Info "proxy mode: ${proxy_mode}, GID (${gid_list[*]}) transparent proxy."
         fi
         ;;
       *)
         log Warning "proxy mode: ${proxy_mode} < error."
-        ${iptables} -t nat -A BOX_LOCAL -p tcp -j REDIRECT --to-ports "${redir_port}"
+        ${iptables} -t nat -A BOX_LOCAL_PROXY -p tcp -j REDIRECT --to-ports "${redir_port}"
         [ ${network_mode} = "enhance" ] || log Info "Transparent proxy for all apps."
         ;;
     esac
@@ -372,24 +385,35 @@ stop_redirect() {
     # ${iptables} -t nat -D BOX_LOCAL -d "${fake_ip_range}" -p icmp -j DNAT --to-destination 127.0.0.1
     ${iptables} -t nat -F BOX_EXTERNAL
     ${iptables} -t nat -X BOX_EXTERNAL
+
     ${iptables} -t nat -F BOX_LOCAL
     ${iptables} -t nat -X BOX_LOCAL
+    ${iptables} -t nat -F BOX_EXTERNAL_PROXY
+    ${iptables} -t nat -X BOX_EXTERNAL_PROXY
+    ${iptables} -t nat -F BOX_LOCAL_PROXY
+    ${iptables} -t nat -X BOX_LOCAL_PROXY
     ${iptables} -t nat -F LOCAL_IP_V4
     ${iptables} -t nat -X LOCAL_IP_V4
   fi
 }
 
 start_tproxy() {
+  local fake_range
   if [ "${iptables}" = "$IPV" ]; then
+    fake_range="${fake_ipv4_range}"
     ip rule add fwmark "${fwmark}" table "${table}" pref "${pref}"
     ip route add local default dev lo table "${table}"
   else
+    fake_range="${fake_ipv6_range}"
     ip -6 rule add fwmark "${fwmark}" table "${table}" pref "${pref}"
     ip -6 route add local default dev lo table "${table}"
   fi
 
   ${iptables} -t mangle -N BOX_EXTERNAL >/dev/null 2>&1
   ${iptables} -t mangle -F BOX_EXTERNAL >/dev/null 2>&1
+
+  ${iptables} -t mangle -N BOX_EXTERNAL_PROXY
+  ${iptables} -t mangle -F BOX_EXTERNAL_PROXY
 
   # ${iptables} -t mangle -A BOX_EXTERNAL -m mark --mark ${routing_mark} -j RETURN
 
@@ -411,6 +435,11 @@ start_tproxy() {
   # ${iptables} -t mangle -A BOX_EXTERNAL -p udp -m socket --transparent -j MARK --set-xmark ${fwmark}
   # ${iptables} -t mangle -A BOX_EXTERNAL -m socket -j RETURN
 
+  # Fake-IP skips destination bypass, not the allowed-interface rules.
+  if [ -n "${fake_range}" ]; then
+    ${iptables} -t mangle -A BOX_EXTERNAL -d "${fake_range}" -g BOX_EXTERNAL_PROXY
+  fi
+
   # Bypass intranet, run `su -c 'zcat /proc/config.gz | grep -i addrtype'` to check compatibility
   # ${iptables} -t mangle -A BOX_EXTERNAL -m addrtype --dst-type LOCAL -j RETURN
   if [ "${iptables}" = "$IPV" ]; then
@@ -429,14 +458,16 @@ start_tproxy() {
     ${iptables} -t mangle -A BOX_EXTERNAL -j LOCAL_IP_V6
   fi
 
-  [ ${network_mode} = "enhance" ] || ${iptables} -t mangle -A BOX_EXTERNAL -p tcp -i lo -j TPROXY --on-port "${tproxy_port}" --tproxy-mark "${fwmark}"
-  ${iptables} -t mangle -A BOX_EXTERNAL -p udp -i lo -j TPROXY --on-port "${tproxy_port}" --tproxy-mark "${fwmark}"
+  ${iptables} -t mangle -A BOX_EXTERNAL -g BOX_EXTERNAL_PROXY
+
+  [ ${network_mode} = "enhance" ] || ${iptables} -t mangle -A BOX_EXTERNAL_PROXY -p tcp -i lo -j TPROXY --on-port "${tproxy_port}" --tproxy-mark "${fwmark}"
+  ${iptables} -t mangle -A BOX_EXTERNAL_PROXY -p udp -i lo -j TPROXY --on-port "${tproxy_port}" --tproxy-mark "${fwmark}"
 
   # Allow ap interface, Notice: Old android device may only have one wlan interface. Some new android device have multiple wlan interface like wlan0(for internet), wlan1(for AP), loop through the access point list
   if [ "${ap_list}" != "" ]; then
     for ap in ${ap_list[@]} ; do
-      [ ${network_mode} = "enhance" ] || ${iptables} -t mangle -A BOX_EXTERNAL -p tcp -i "${ap}" -j TPROXY --on-port "${tproxy_port}" --tproxy-mark "${fwmark}"
-      ${iptables} -t mangle -A BOX_EXTERNAL -p udp -i "${ap}" -j TPROXY --on-port "${tproxy_port}" --tproxy-mark "${fwmark}"
+      [ ${network_mode} = "enhance" ] || ${iptables} -t mangle -A BOX_EXTERNAL_PROXY -p tcp -i "${ap}" -j TPROXY --on-port "${tproxy_port}" --tproxy-mark "${fwmark}"
+      ${iptables} -t mangle -A BOX_EXTERNAL_PROXY -p udp -i "${ap}" -j TPROXY --on-port "${tproxy_port}" --tproxy-mark "${fwmark}"
     done
     [ "${iptables}" = "$IPV" ] && log Info "${ap_list[*]} transparent proxy."
   fi
@@ -444,6 +475,8 @@ start_tproxy() {
   ${iptables} -t mangle -I PREROUTING -j BOX_EXTERNAL
   ${iptables} -t mangle -N BOX_LOCAL
   ${iptables} -t mangle -F BOX_LOCAL
+  ${iptables} -t mangle -N BOX_LOCAL_PROXY
+  ${iptables} -t mangle -F BOX_LOCAL_PROXY
 
   ${iptables} -t mangle -A BOX_LOCAL -m owner --uid-owner ${box_user} --gid-owner ${box_group} -j RETURN
   # ${iptables} -t mangle -A BOX_LOCAL -m mark --mark ${routing_mark} -j RETURN
@@ -463,6 +496,11 @@ start_tproxy() {
       ${iptables} -t mangle -A BOX_LOCAL -p udp --dport 53 -j MARK --set-xmark ${fwmark}
   fi
 
+  # Keep owner/output-interface/DNS handling above; only skip destination bypass.
+  if [ -n "${fake_range}" ]; then
+    ${iptables} -t mangle -A BOX_LOCAL -d "${fake_range}" -g BOX_LOCAL_PROXY
+  fi
+
   if [ "${iptables}" = "$IPV" ]; then
     for subnet in ${intranet[@]} ; do
       ${iptables} -t mangle -A BOX_LOCAL -d ${subnet} -j RETURN
@@ -474,58 +512,59 @@ start_tproxy() {
     done
     ${iptables} -t mangle -A BOX_LOCAL -j LOCAL_IP_V6
   fi
+  ${iptables} -t mangle -A BOX_LOCAL -g BOX_LOCAL_PROXY
 
   case "${proxy_mode}" in
     blacklist|black)
       if [ -z "$(cat "${uid_list[@]}")" ] ; then
-        [ ${network_mode} = "enhance" ] || ${iptables} -t mangle -A BOX_LOCAL -p tcp -j MARK --set-xmark "${fwmark}"
-        ${iptables} -t mangle -A BOX_LOCAL -p udp -j MARK --set-xmark "${fwmark}"
+        [ ${network_mode} = "enhance" ] || ${iptables} -t mangle -A BOX_LOCAL_PROXY -p tcp -j MARK --set-xmark "${fwmark}"
+        ${iptables} -t mangle -A BOX_LOCAL_PROXY -p udp -j MARK --set-xmark "${fwmark}"
         [ "${iptables}" = "$IPV" ] && log Info "transparent proxy for all apps."
       else
         while read -r appid; do
-          ${iptables} -t mangle -A BOX_LOCAL -m owner --uid-owner "${appid}" -j RETURN
+          ${iptables} -t mangle -A BOX_LOCAL_PROXY -m owner --uid-owner "${appid}" -j RETURN
         done < "${uid_list[@]}"
-        [ ${network_mode} = "enhance" ] || ${iptables} -t mangle -A BOX_LOCAL -p tcp -j MARK --set-xmark "${fwmark}"
-        ${iptables} -t mangle -A BOX_LOCAL -p udp -j MARK --set-xmark "${fwmark}"
+        [ ${network_mode} = "enhance" ] || ${iptables} -t mangle -A BOX_LOCAL_PROXY -p tcp -j MARK --set-xmark "${fwmark}"
+        ${iptables} -t mangle -A BOX_LOCAL_PROXY -p udp -j MARK --set-xmark "${fwmark}"
         [ "${iptables}" = "$IPV" ] && log Info "proxy mode: ${proxy_mode} (${packages_list[*]}) no transparent proxy."
       fi
 
       if [ "${gid_list}" != "" ] ; then
         for gid in ${gid_list[@]} ; do
-          ${iptables} -t mangle -A BOX_LOCAL -m owner --gid-owner ${gid} -j RETURN
+          ${iptables} -t mangle -A BOX_LOCAL_PROXY -m owner --gid-owner ${gid} -j RETURN
         done
         [ "${iptables}" = "$IPV" ] && log Info "proxy mode: ${proxy_mode}, GID (${gid_list[*]}) no transparent proxy."
       fi
       ;;
     whitelist|white)
       if [ -z "$(cat "${uid_list[@]}")" ] ; then
-        [ ${network_mode} = "enhance" ] || ${iptables} -t mangle -A BOX_LOCAL -p tcp -j MARK --set-xmark "${fwmark}"
-        ${iptables} -t mangle -A BOX_LOCAL -p udp -j MARK --set-xmark "${fwmark}"
+        [ ${network_mode} = "enhance" ] || ${iptables} -t mangle -A BOX_LOCAL_PROXY -p tcp -j MARK --set-xmark "${fwmark}"
+        ${iptables} -t mangle -A BOX_LOCAL_PROXY -p udp -j MARK --set-xmark "${fwmark}"
         [ "${iptables}" = "$IPV" ] && log Info "transparent proxy for all apps."
       else
         while read -r appid; do
-          [ ${network_mode} = "enhance" ] || ${iptables} -t mangle -A BOX_LOCAL -p tcp -m owner --uid-owner "${appid}" -j MARK --set-xmark "${fwmark}"
-          ${iptables} -t mangle -A BOX_LOCAL -p udp -m owner --uid-owner "${appid}" -j MARK --set-xmark "${fwmark}"
+          [ ${network_mode} = "enhance" ] || ${iptables} -t mangle -A BOX_LOCAL_PROXY -p tcp -m owner --uid-owner "${appid}" -j MARK --set-xmark "${fwmark}"
+          ${iptables} -t mangle -A BOX_LOCAL_PROXY -p udp -m owner --uid-owner "${appid}" -j MARK --set-xmark "${fwmark}"
         done < "${uid_list[@]}"
-        [ ${network_mode} = "enhance" ] || ${iptables} -t mangle -A BOX_LOCAL -p tcp -m owner --uid-owner 0 -j MARK --set-xmark "${fwmark}"
-        ${iptables} -t mangle -A BOX_LOCAL -p udp -m owner --uid-owner 0 -j MARK --set-xmark "${fwmark}"
-        [ ${network_mode} = "enhance" ] || ${iptables} -t mangle -A BOX_LOCAL -p tcp -m owner --uid-owner 1052 -j MARK --set-xmark "${fwmark}"
-        ${iptables} -t mangle -A BOX_LOCAL -p udp -m owner --uid-owner 1052 -j MARK --set-xmark "${fwmark}"
+        [ ${network_mode} = "enhance" ] || ${iptables} -t mangle -A BOX_LOCAL_PROXY -p tcp -m owner --uid-owner 0 -j MARK --set-xmark "${fwmark}"
+        ${iptables} -t mangle -A BOX_LOCAL_PROXY -p udp -m owner --uid-owner 0 -j MARK --set-xmark "${fwmark}"
+        [ ${network_mode} = "enhance" ] || ${iptables} -t mangle -A BOX_LOCAL_PROXY -p tcp -m owner --uid-owner 1052 -j MARK --set-xmark "${fwmark}"
+        ${iptables} -t mangle -A BOX_LOCAL_PROXY -p udp -m owner --uid-owner 1052 -j MARK --set-xmark "${fwmark}"
         [ "${iptables}" = "$IPV" ] && log Info "proxy mode: ${proxy_mode} (${packages_list[*]}) transparent proxy."
       fi
 
       if [ "${gid_list}" != "" ] ; then
         for gid in ${gid_list[@]} ; do
-          [ ${network_mode} = "enhance" ] || ${iptables} -t mangle -A BOX_LOCAL -p tcp -m owner --gid-owner ${gid} -j MARK --set-xmark "${fwmark}"
-          ${iptables} -t mangle -A BOX_LOCAL -p udp -m owner --gid-owner ${gid} -j MARK --set-xmark "${fwmark}"
+          [ ${network_mode} = "enhance" ] || ${iptables} -t mangle -A BOX_LOCAL_PROXY -p tcp -m owner --gid-owner ${gid} -j MARK --set-xmark "${fwmark}"
+          ${iptables} -t mangle -A BOX_LOCAL_PROXY -p udp -m owner --gid-owner ${gid} -j MARK --set-xmark "${fwmark}"
         done
         [ "${iptables}" = "$IPV" ] && log Info "proxy mode: ${proxy_mode}, GID (${gid_list[*]}) transparent proxy."
       fi
       ;;
     *)
       log Debug "proxy mode: ${proxy_mode} < error"
-      [ ${network_mode} = "enhance" ] || ${iptables} -t mangle -A BOX_LOCAL -p tcp -j MARK --set-xmark "${fwmark}"
-      ${iptables} -t mangle -A BOX_LOCAL -p udp -j MARK --set-xmark "${fwmark}"
+      [ ${network_mode} = "enhance" ] || ${iptables} -t mangle -A BOX_LOCAL_PROXY -p tcp -j MARK --set-xmark "${fwmark}"
+      ${iptables} -t mangle -A BOX_LOCAL_PROXY -p udp -j MARK --set-xmark "${fwmark}"
       [ "${iptables}" = "$IPV" ] && log Info "transparent proxy for all apps."
       ;;
     esac
@@ -605,6 +644,10 @@ stop_tproxy() {
 
   ${iptables} -t mangle -F BOX_LOCAL
   ${iptables} -t mangle -X BOX_LOCAL
+  ${iptables} -t mangle -F BOX_EXTERNAL_PROXY
+  ${iptables} -t mangle -X BOX_EXTERNAL_PROXY
+  ${iptables} -t mangle -F BOX_LOCAL_PROXY
+  ${iptables} -t mangle -X BOX_LOCAL_PROXY
 
   ${IPV} -t mangle -F LOCAL_IP_V4
   ${IPV} -t mangle -X LOCAL_IP_V4
